@@ -8,6 +8,7 @@
         <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
         <outputRelativeToContentRoot value="true" />
         <module name="Project Exchangeable Image File Format" />
+        <module name="Image-File-Format" />
       </profile>
     </annotationProcessing>
   </component>
