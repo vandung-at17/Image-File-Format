@@ -37,6 +37,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
@@ -48,22 +50,20 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 public class WriteExif extends JFrame {
 
-    // Danh sách quản lý ảnh và thẻ Thumbnail
     private final List<File> imageFiles = new ArrayList<>();
     private final List<JPanel> thumbnailCards = new ArrayList<>();
     private int selectedIndex = -1;
     private boolean isUpdatingMakeCombo = false;
 
-    // Bộ nhớ tạm phục vụ tính năng Copy / Paste EXIF giữa các ảnh
+    // Cờ chống xung đột đa luồng (Race Condition) khi đang nạp/lưu ảnh
+    private volatile boolean isBusy = false;
+
     private ExifFormData exifClipboard = null;
 
-    // Viền xanh cho ảnh đang được chọn trong danh sách dưới
     private static final Color SELECTED_BORDER_COLOR = new Color(0, 150, 255);
     private static final Border BORDER_SELECTED = BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(SELECTED_BORDER_COLOR, 3),
@@ -74,80 +74,45 @@ public class WriteExif extends JFrame {
             BorderFactory.createEmptyBorder(4, 4, 4, 4)
     );
 
-    // Các thành phần bên trái (Preview + Zoom + Thumbnail List)
     private final ZoomableImagePanel previewCanvas = new ZoomableImagePanel();
     private final JPanel thumbnailListPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
     private final JLabel lblZoomPercent = new JLabel("100%", SwingConstants.CENTER);
     private final JLabel lblImageInfo = new JLabel("Chưa chọn ảnh (Có thể kéo thả ảnh trực tiếp vào đây)");
     private final JLabel lblListCount = new JLabel("Tổng: 0 ảnh");
 
-    // Các thành phần bên phải (Form nhập thông số)
     private final JLabel lblExifStatus = new JLabel("Hãy chọn hoặc kéo thả ảnh vào để bắt đầu...");
     private final JTextField txtFilePath = new JTextField();
     private final JTextField txtNewFileName = new JTextField();
 
-    private static final Map<String, String[]> CAMERA_DATA = new LinkedHashMap<>();
-    static {
-        CAMERA_DATA.put("", new String[]{""});
-        CAMERA_DATA.put("Canon", new String[]{
-                "Canon EOS R5", "Canon EOS R6 Mark II", "Canon EOS RP", "Canon EOS 5D Mark IV", "Canon EOS 6D Mark II"
-        });
-        CAMERA_DATA.put("Sony", new String[]{
-                "ILCE-7M4", "ILCE-7RM5", "ILCE-7SM3", "ILCE-7C", "ZV-E10"
-        });
-        CAMERA_DATA.put("Nikon", new String[]{
-                "NIKON Z 8", "NIKON Z 6_2", "NIKON Z f", "NIKON D850", "NIKON D750"
-        });
-        CAMERA_DATA.put("Fujifilm", new String[]{
-                "X-T5", "X-S20", "X100VI", "X-T30 II", "GFX100 II"
-        });
-        CAMERA_DATA.put("OPPO", new String[]{
-                "OPPO Find X8 Ultra", "OPPO Find X8 Pro", "OPPO Find X7 Ultra"
-        });
-        CAMERA_DATA.put("Apple", new String[]{
-                "iPhone 16 Pro Max", "iPhone 15 Pro Max", "iPhone 14 Pro Max", "iPhone 13 Pro"
-        });
-        CAMERA_DATA.put("Ricoh", new String[]{
-                "RICOH GR III", "RICOH GR IIIx"
-        });
-    }
-
-    private static final String[] COMMON_LENSES = {
-            "",
-            "RF 50mm F1.2L USM",
-            "RF 24-70mm F2.8L IS USM",
-            "FE 24-70mm F2.8 GM II",
-            "FE 85mm F1.4 GM",
-            "NIKKOR Z 24-70mm f/2.8 S",
-            "XF 35mm F1.4 R",
-            "Hasselblad Mobile Camera"
-    };
-
     private final JComboBox<String> cbMake;
     private final JComboBox<String> cbModel;
-    private final JComboBox<String> cbLens = new JComboBox<>(COMMON_LENSES);
+    private final JComboBox<String> cbLens = new JComboBox<>(CameraRepository.COMMON_LENSES);
     private final JTextField txtFNumber = new JTextField("");
     private final JTextField txtIso = new JTextField("");
     private final JTextField txtShutterNum = new JTextField("", 4);
     private final JTextField txtShutterDen = new JTextField("", 5);
     private final JTextField txtFocal = new JTextField("");
 
-    // Bộ chọn Ngày & Giờ + Tăng giây tự động khi lưu hàng loạt
     private LocalDate selectedDate = LocalDate.now();
     private final JTextField txtDate = new JTextField(9);
     private final JSpinner timeSpinner;
     private final JSpinner spnStepSeconds = new JSpinner(new SpinnerNumberModel(5, 0, 3600, 1));
 
-    private final JCheckBox chkBackup = new JCheckBox("Tạo bản sao lưu (_original_backup) trước khi ghi đè", true);
+    // Mặc định KHÔNG tích chọn tạo bản sao lưu theo yêu cầu
+    private final JCheckBox chkBackup = new JCheckBox("Tạo bản sao lưu (_original_backup) trước khi ghi đè", false);
     private final JProgressBar progressBar = new JProgressBar(0, 100);
 
+    private final JButton btnBrowse = new JButton("📂 Chọn ảnh...");
+    private final JButton btnAddMore = new JButton("➕ Thêm ảnh");
+    private final JButton btnRemoveSelected = new JButton("🗑️ Bỏ ảnh đang chọn");
+    private final JButton btnClearAll = new JButton("🧹 Xóa hết list");
     private final JButton btnPasteExif = new JButton("📥 Paste EXIF");
     private final JButton btnSaveSingle = new JButton("💾 Lưu ảnh đang chọn");
     private final JButton btnSaveAll = new JButton("⚡ Áp dụng cho TẤT CẢ ảnh");
     private final JButton btnStripExif = new JButton("🧹 Xóa sạch EXIF ảnh này");
 
     public WriteExif() {
-        setTitle("Chỉnh sửa thông số Image (EXIF Editor Pro)");
+        setTitle("Chỉnh sửa thông số Image (EXIF Editor Pro - Flagship Edition)");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(1100, 700);
         setLocationRelativeTo(null);
@@ -161,7 +126,7 @@ public class WriteExif extends JFrame {
         JPanel leftContainer = new JPanel(new BorderLayout(0, 8));
 
         JPanel mainPreviewWrapper = new JPanel(new BorderLayout());
-        mainPreviewWrapper.setBorder(new TitledBorder("Xem trước ảnh (Lăn chuột để Zoom, kéo chuột để di chuyển)"));
+        mainPreviewWrapper.setBorder(new TitledBorder("Xem trước ảnh (Lăn chuột để Zoom vào tâm, kéo chuột để di chuyển)"));
 
         JPanel zoomToolbar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 3));
         JButton btnZoomOut = new JButton("➖");
@@ -190,9 +155,8 @@ public class WriteExif extends JFrame {
         mainPreviewWrapper.add(previewCanvas, BorderLayout.CENTER);
         mainPreviewWrapper.add(bottomInfoBar, BorderLayout.SOUTH);
 
-        // Thanh List Preview bên dưới
         JPanel bottomListWrapper = new JPanel(new BorderLayout(0, 4));
-        bottomListWrapper.setBorder(new TitledBorder("Danh sách ảnh (Click để chọn — Phím Delete để bỏ)"));
+        bottomListWrapper.setBorder(new TitledBorder("Danh sách ảnh (Click hoặc nhấn phím ← / → để chuyển — Phím Delete để bỏ)"));
         bottomListWrapper.setPreferredSize(new Dimension(0, 165));
 
         JPanel listControlBar = new JPanel(new BorderLayout());
@@ -200,10 +164,6 @@ public class WriteExif extends JFrame {
         lblListCount.setFont(new Font("SansSerif", Font.BOLD, 12));
 
         JPanel listButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-        JButton btnAddMore = new JButton("➕ Thêm ảnh");
-        JButton btnRemoveSelected = new JButton("🗑️ Bỏ ảnh đang chọn");
-        JButton btnClearAll = new JButton("🧹 Xóa hết list");
-
         btnAddMore.addActionListener(e -> chooseMultipleFiles(true));
         btnRemoveSelected.addActionListener(e -> removeSelectedImage());
         btnClearAll.addActionListener(e -> clearAllImages());
@@ -254,7 +214,7 @@ public class WriteExif extends JFrame {
         btnPasteExif.setEnabled(false);
         btnPasteExif.addActionListener(e -> pasteExifFromClipboard());
 
-        JButton btnFillPreset = new JButton("✨ Điền mẫu R5");
+        JButton btnFillPreset = new JButton("✨ Điền mẫu Ultra");
         btnFillPreset.addActionListener(e -> fillSamplePreset());
 
         quickActionsPanel.add(btnCopyExif);
@@ -265,7 +225,6 @@ public class WriteExif extends JFrame {
         formPanel.add(quickActionsPanel, gbc);
 
         txtFilePath.setEditable(false);
-        JButton btnBrowse = new JButton("📂 Chọn ảnh...");
         btnBrowse.setFont(new Font("SansSerif", Font.BOLD, 12));
         btnBrowse.addActionListener(e -> chooseMultipleFiles(false));
 
@@ -276,18 +235,19 @@ public class WriteExif extends JFrame {
 
         addRow(formPanel, gbc, 3, "Tên file lưu:", txtNewFileName);
 
-        String[] makes = CAMERA_DATA.keySet().toArray(new String[0]);
+        String[] makes = CameraRepository.getMakes();
         cbMake = new JComboBox<>(makes);
-        cbModel = new JComboBox<>(CAMERA_DATA.get(makes[0]));
+        cbModel = new JComboBox<>(CameraRepository.getModelsForMake(makes[0]));
         cbMake.setEditable(true);
         cbModel.setEditable(true);
         cbLens.setEditable(true);
 
         cbMake.addActionListener(e -> {
             if (isUpdatingMakeCombo) return;
-            String make = String.valueOf(cbMake.getSelectedItem()).trim();
-            if (CAMERA_DATA.containsKey(make)) {
-                cbModel.setModel(new DefaultComboBoxModel<>(CAMERA_DATA.get(make)));
+            String make = getComboValue(cbMake);
+            String matchedMake = CameraRepository.matchMakeIgnoreCase(make);
+            if (matchedMake != null) {
+                cbModel.setModel(new DefaultComboBoxModel<>(CameraRepository.getModelsForMake(matchedMake)));
             }
         });
 
@@ -369,33 +329,83 @@ public class WriteExif extends JFrame {
 
         setupDragAndDrop(previewCanvas);
         setupDragAndDrop(thumbnailListPanel);
-
-        rootPanel.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
-                .put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "removeSelectedImage");
-        rootPanel.getActionMap().put("removeSelectedImage", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                if (!isTypingInTextField()) {
-                    removeSelectedImage();
-                }
-            }
-        });
+        setupKeyboardNavigation(rootPanel);
 
         rootPanel.add(leftContainer, BorderLayout.CENTER);
         rootPanel.add(formPanel, BorderLayout.EAST);
         add(rootPanel);
     }
 
-    private boolean isTypingInTextField() {
-        Component focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
-        return focusOwner instanceof JTextField;
+    // FIX LỖI 2: Đọc trực tiếp giá trị đang gõ trong Editor của JComboBox ngay cả khi chưa bấm Enter
+    private String getComboValue(JComboBox<String> combo) {
+        if (combo.isEditable() && combo.getEditor() != null) {
+            Object editorItem = combo.getEditor().getItem();
+            if (editorItem != null) {
+                return editorItem.toString().trim();
+            }
+        }
+        Object selected = combo.getSelectedItem();
+        return selected != null ? selected.toString().trim() : "";
     }
 
+    private void setComboValue(JComboBox<String> combo, String value) {
+        combo.setSelectedItem(value);
+        if (combo.isEditable() && combo.getEditor() != null) {
+            combo.getEditor().setItem(value);
+        }
+    }
+
+    private boolean isTypingInTextField() {
+        Component focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+        return focusOwner instanceof JTextField || focusOwner instanceof JFormattedTextField;
+    }
+
+    // FIX LỖI 9: Bổ sung phím tắt Mũi tên Trái/Phải để chuyển ảnh & tự cuộn thanh danh sách
+    private void setupKeyboardNavigation(JPanel rootPanel) {
+        InputMap im = rootPanel.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
+        ActionMap am = rootPanel.getActionMap();
+
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "removeSelectedImage");
+        am.put("removeSelectedImage", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (!isBusy && !isTypingInTextField()) {
+                    removeSelectedImage();
+                }
+            }
+        });
+
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_LEFT, 0), "prevImage");
+        am.put("prevImage", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (!isBusy && !isTypingInTextField() && selectedIndex > 0) {
+                    selectImageAt(selectedIndex - 1);
+                }
+            }
+        });
+
+        im.put(KeyStroke.getKeyStroke(KeyEvent.VK_RIGHT, 0), "nextImage");
+        am.put("nextImage", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (!isBusy && !isTypingInTextField() && selectedIndex < imageFiles.size() - 1) {
+                    selectImageAt(selectedIndex + 1);
+                }
+            }
+        });
+    }
+
+    // FIX LỖI 6: Chặn Kéo-Thả khi đang bận xử lý luồng ngầm (Chống Race Condition)
     private void setupDragAndDrop(Component targetComp) {
         new DropTarget(targetComp, DnDConstants.ACTION_COPY, new DropTargetAdapter() {
             @Override
             @SuppressWarnings("unchecked")
             public void drop(DropTargetDropEvent dtde) {
+                if (isBusy) {
+                    dtde.rejectDrop();
+                    return;
+                }
                 try {
                     dtde.acceptDrop(DnDConstants.ACTION_COPY);
                     Object transferData = dtde.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
@@ -436,14 +446,17 @@ public class WriteExif extends JFrame {
         resetFieldColors();
 
         isUpdatingMakeCombo = true;
-        cbMake.setSelectedItem(exifClipboard.make);
-        if (CAMERA_DATA.containsKey(exifClipboard.make)) {
-            cbModel.setModel(new DefaultComboBoxModel<>(CAMERA_DATA.get(exifClipboard.make)));
+        String matchedMake = CameraRepository.matchMakeIgnoreCase(exifClipboard.make);
+        if (matchedMake != null) {
+            setComboValue(cbMake, matchedMake);
+            cbModel.setModel(new DefaultComboBoxModel<>(CameraRepository.getModelsForMake(matchedMake)));
+        } else {
+            setComboValue(cbMake, exifClipboard.make);
         }
-        cbModel.setSelectedItem(exifClipboard.model);
+        setComboValue(cbModel, exifClipboard.model);
         isUpdatingMakeCombo = false;
 
-        cbLens.setSelectedItem(exifClipboard.lens);
+        setComboValue(cbLens, exifClipboard.lens);
         txtFNumber.setText(trimTrailingZero(exifClipboard.fNumber));
         txtIso.setText(String.valueOf(exifClipboard.iso));
         txtShutterNum.setText(String.valueOf(exifClipboard.shutterNum));
@@ -484,12 +497,12 @@ public class WriteExif extends JFrame {
     private void resetFormToEmpty() {
         resetFieldColors();
         isUpdatingMakeCombo = true;
-        cbMake.setSelectedItem("");
-        cbModel.setModel(new DefaultComboBoxModel<>(CAMERA_DATA.get("")));
-        cbModel.setSelectedItem("");
+        setComboValue(cbMake, "");
+        cbModel.setModel(new DefaultComboBoxModel<>(CameraRepository.getModelsForMake("")));
+        setComboValue(cbModel, "");
         isUpdatingMakeCombo = false;
 
-        cbLens.setSelectedItem("");
+        setComboValue(cbLens, "");
         txtFNumber.setText("");
         txtIso.setText("");
         txtShutterNum.setText("");
@@ -504,23 +517,24 @@ public class WriteExif extends JFrame {
     private void fillSamplePreset() {
         resetFieldColors();
         isUpdatingMakeCombo = true;
-        cbMake.setSelectedItem("Canon");
-        cbModel.setModel(new DefaultComboBoxModel<>(CAMERA_DATA.get("Canon")));
-        cbModel.setSelectedItem("Canon EOS R5");
+        setComboValue(cbMake, "OPPO");
+        cbModel.setModel(new DefaultComboBoxModel<>(CameraRepository.getModelsForMake("OPPO")));
+        setComboValue(cbModel, "OPPO Find X8 Ultra");
         isUpdatingMakeCombo = false;
 
-        cbLens.setSelectedItem("RF 50mm F1.2L USM");
-        txtFNumber.setText("2.8");
-        txtIso.setText("100");
+        setComboValue(cbLens, "Hasselblad Main Camera 1-inch");
+        txtFNumber.setText("1.8");
+        txtIso.setText("50");
         txtShutterNum.setText("1");
-        txtShutterDen.setText("250");
-        txtFocal.setText("50");
+        txtShutterDen.setText("1000");
+        txtFocal.setText("23");
 
-        lblExifStatus.setText("✨ Đã điền bộ thông số mẫu Canon R5");
+        lblExifStatus.setText("✨ Đã điền bộ thông số mẫu OPPO Find X8 Ultra");
         lblExifStatus.setForeground(new Color(0, 102, 204));
     }
 
     private void chooseMultipleFiles(boolean append) {
+        if (isBusy) return;
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Chọn một hoặc nhiều ảnh JPEG");
         chooser.setMultiSelectionEnabled(true);
@@ -544,7 +558,9 @@ public class WriteExif extends JFrame {
                     newFiles.add(f);
                 }
             }
-            loadThumbnailsInBackground(newFiles, !append);
+            if (!newFiles.isEmpty()) {
+                loadThumbnailsInBackground(newFiles, !append);
+            }
         }
     }
 
@@ -610,9 +626,14 @@ public class WriteExif extends JFrame {
         card.setToolTipText(file.getName() + " (" + formatFileSize(file.length()) + ")");
 
         JLabel thumbImgLabel = new JLabel("", SwingConstants.CENTER);
-        ImageIcon icon = createSubsampledThumbnail(file, 82, 64);
-        if (icon != null) {
-            thumbImgLabel.setIcon(icon);
+        BufferedImage subsampled = readSubsampledImage(file, 160, 130, null);
+        if (subsampled != null) {
+            double scale = Math.min(82.0 / subsampled.getWidth(), 64.0 / subsampled.getHeight());
+            int w = Math.max(1, (int) (subsampled.getWidth() * scale));
+            int h = Math.max(1, (int) (subsampled.getHeight() * scale));
+            Image scaled = subsampled.getScaledInstance(w, h, Image.SCALE_SMOOTH);
+            subsampled.flush();
+            thumbImgLabel.setIcon(new ImageIcon(scaled));
         } else {
             thumbImgLabel.setText("Lỗi ảnh");
         }
@@ -626,6 +647,7 @@ public class WriteExif extends JFrame {
         card.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
+                if (isBusy) return;
                 int idx = thumbnailCards.indexOf(card);
                 if (idx >= 0) {
                     selectImageAt(idx);
@@ -635,7 +657,8 @@ public class WriteExif extends JFrame {
         return card;
     }
 
-    private ImageIcon createSubsampledThumbnail(File file, int maxW, int maxH) {
+    // FIX LỖI 7: Dùng Subsampling cho cả Thumbnail và Preview chính để click chuyển ảnh 50MP tức thì (0.01s)
+    private BufferedImage readSubsampledImage(File file, int targetMaxW, int targetMaxH, Dimension outOriginalSize) {
         try (ImageInputStream iis = ImageIO.createImageInputStream(file)) {
             if (iis == null) return null;
             Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
@@ -643,24 +666,18 @@ public class WriteExif extends JFrame {
             ImageReader reader = readers.next();
             try {
                 reader.setInput(iis, true, true);
-                int width = reader.getWidth(0);
-                int height = reader.getHeight(0);
-                int subsampling = Math.max(1, Math.min(width / (maxW * 2), height / (maxH * 2)));
+                int origW = reader.getWidth(0);
+                int origH = reader.getHeight(0);
+                if (outOriginalSize != null) {
+                    outOriginalSize.setSize(origW, origH);
+                }
 
+                int subsampling = Math.max(1, Math.min(origW / targetMaxW, origH / targetMaxH));
                 ImageReadParam param = reader.getDefaultReadParam();
                 param.setSourceSubsampling(subsampling, subsampling, 0, 0);
 
-                BufferedImage subsampled = reader.read(0, param);
-                if (subsampled == null) return null;
-
-                subsampled = applyExifOrientation(file, subsampled);
-
-                double scale = Math.min((double) maxW / subsampled.getWidth(), (double) maxH / subsampled.getHeight());
-                int w = Math.max(1, (int) (subsampled.getWidth() * scale));
-                int h = Math.max(1, (int) (subsampled.getHeight() * scale));
-                Image scaled = subsampled.getScaledInstance(w, h, Image.SCALE_SMOOTH);
-                subsampled.flush();
-                return new ImageIcon(scaled);
+                BufferedImage img = reader.read(0, param);
+                return applyExifOrientation(file, img);
             } finally {
                 reader.dispose();
             }
@@ -679,8 +696,9 @@ public class WriteExif extends JFrame {
                     int orientation = orientField.getIntValue();
                     int w = img.getWidth();
                     int h = img.getHeight();
+                    int type = img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType();
                     if (orientation == 6) {
-                        BufferedImage rotated = new BufferedImage(h, w, img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType());
+                        BufferedImage rotated = new BufferedImage(h, w, type);
                         Graphics2D g2d = rotated.createGraphics();
                         AffineTransform at = new AffineTransform();
                         at.translate(h, 0);
@@ -690,7 +708,7 @@ public class WriteExif extends JFrame {
                         img.flush();
                         return rotated;
                     } else if (orientation == 8) {
-                        BufferedImage rotated = new BufferedImage(h, w, img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType());
+                        BufferedImage rotated = new BufferedImage(h, w, type);
                         Graphics2D g2d = rotated.createGraphics();
                         AffineTransform at = new AffineTransform();
                         at.translate(0, w);
@@ -700,7 +718,7 @@ public class WriteExif extends JFrame {
                         img.flush();
                         return rotated;
                     } else if (orientation == 3) {
-                        BufferedImage rotated = new BufferedImage(w, h, img.getType() == 0 ? BufferedImage.TYPE_INT_RGB : img.getType());
+                        BufferedImage rotated = new BufferedImage(w, h, type);
                         Graphics2D g2d = rotated.createGraphics();
                         AffineTransform at = new AffineTransform();
                         at.translate(w, h);
@@ -717,7 +735,7 @@ public class WriteExif extends JFrame {
     }
 
     private void removeSelectedImage() {
-        if (selectedIndex < 0 || selectedIndex >= imageFiles.size()) return;
+        if (isBusy || selectedIndex < 0 || selectedIndex >= imageFiles.size()) return;
         imageFiles.remove(selectedIndex);
         JPanel removedCard = thumbnailCards.remove(selectedIndex);
         thumbnailListPanel.remove(removedCard);
@@ -741,7 +759,7 @@ public class WriteExif extends JFrame {
     }
 
     private void clearAllImages() {
-        if (imageFiles.isEmpty()) return;
+        if (isBusy || imageFiles.isEmpty()) return;
         imageFiles.clear();
         thumbnailCards.clear();
         thumbnailListPanel.removeAll();
@@ -768,6 +786,7 @@ public class WriteExif extends JFrame {
             if (i == selectedIndex) {
                 card.setBorder(BORDER_SELECTED);
                 card.setBackground(new Color(232, 244, 255));
+                thumbnailListPanel.scrollRectToVisible(card.getBounds());
             } else {
                 card.setBorder(BORDER_NORMAL);
                 card.setBackground(Color.WHITE);
@@ -784,24 +803,20 @@ public class WriteExif extends JFrame {
             txtNewFileName.setText(currentName);
         }
 
-        try {
-            BufferedImage rawImg = ImageIO.read(currentFile);
-            BufferedImage img = applyExifOrientation(currentFile, rawImg);
-            previewCanvas.setImage(img);
-            if (img != null) {
-                lblImageInfo.setText(String.format("Độ phân giải: %d x %d px   |   Dung lượng: %s   |   File: %s",
-                        img.getWidth(), img.getHeight(), formatFileSize(currentFile.length()), currentFile.getName()));
-            } else {
-                lblImageInfo.setText("Không đọc được kích thước ảnh");
-            }
-        } catch (Exception ex) {
-            previewCanvas.setImage(null);
-            lblImageInfo.setText("Lỗi đọc ảnh");
+        Dimension origDim = new Dimension();
+        BufferedImage previewImg = readSubsampledImage(currentFile, 2560, 2560, origDim);
+        previewCanvas.setImage(previewImg);
+        if (previewImg != null) {
+            lblImageInfo.setText(String.format("Độ phân giải gốc: %d x %d px   |   Dung lượng: %s   |   File: %s",
+                    origDim.width, origDim.height, formatFileSize(currentFile.length()), currentFile.getName()));
+        } else {
+            lblImageInfo.setText("Không đọc được kích thước ảnh");
         }
 
         readExifAndPopulateForm(currentFile);
     }
 
+    // FIX LỖI 3: Tự động chuẩn hóa chữ hoa/chữ thường khi đọc Hãng máy từ EXIF
     private void readExifAndPopulateForm(File file) {
         resetFormToEmpty();
 
@@ -819,12 +834,15 @@ public class WriteExif extends JFrame {
             // 1. Hãng máy, Model & Ống kính
             TiffField makeField = tiffMeta.findField(TiffTagConstants.TIFF_TAG_MAKE);
             if (makeField != null && makeField.getStringValue() != null) {
-                String makeVal = makeField.getStringValue().trim();
-                if (!makeVal.isEmpty()) {
+                String rawMake = makeField.getStringValue().trim();
+                if (!rawMake.isEmpty()) {
                     isUpdatingMakeCombo = true;
-                    cbMake.setSelectedItem(makeVal);
-                    if (CAMERA_DATA.containsKey(makeVal)) {
-                        cbModel.setModel(new DefaultComboBoxModel<>(CAMERA_DATA.get(makeVal)));
+                    String matchedMake = CameraRepository.matchMakeIgnoreCase(rawMake);
+                    if (matchedMake != null) {
+                        setComboValue(cbMake, matchedMake);
+                        cbModel.setModel(new DefaultComboBoxModel<>(CameraRepository.getModelsForMake(matchedMake)));
+                    } else {
+                        setComboValue(cbMake, rawMake);
                     }
                     isUpdatingMakeCombo = false;
                     foundAny = true;
@@ -835,7 +853,7 @@ public class WriteExif extends JFrame {
             if (modelField != null && modelField.getStringValue() != null) {
                 String modelVal = modelField.getStringValue().trim();
                 if (!modelVal.isEmpty()) {
-                    cbModel.setSelectedItem(modelVal);
+                    setComboValue(cbModel, modelVal);
                     foundAny = true;
                 }
             }
@@ -844,7 +862,7 @@ public class WriteExif extends JFrame {
             if (lensField != null && lensField.getStringValue() != null) {
                 String lensVal = lensField.getStringValue().trim();
                 if (!lensVal.isEmpty()) {
-                    cbLens.setSelectedItem(lensVal);
+                    setComboValue(cbLens, lensVal);
                     foundAny = true;
                 }
             }
@@ -852,7 +870,7 @@ public class WriteExif extends JFrame {
             // 2. Khẩu độ
             TiffField fField = tiffMeta.findField(ExifTagConstants.EXIF_TAG_FNUMBER);
             if (fField != null) {
-                double fVal = fField.getDoubleValue();
+                double fVal = roundTwoDecimals(fField.getDoubleValue());
                 if (fVal > 0) {
                     txtFNumber.setText(trimTrailingZero(fVal));
                     foundAny = true;
@@ -897,7 +915,7 @@ public class WriteExif extends JFrame {
                 focalField = tiffMeta.findField(ExifTagConstants.EXIF_TAG_FOCAL_LENGTH_IN_35MM_FORMAT);
             }
             if (focalField != null) {
-                double focalVal = focalField.getDoubleValue();
+                double focalVal = roundTwoDecimals(focalField.getDoubleValue());
                 if (focalVal > 0) {
                     txtFocal.setText(trimTrailingZero(focalVal));
                     foundAny = true;
@@ -986,16 +1004,13 @@ public class WriteExif extends JFrame {
         }
 
         ExifFormData data = new ExifFormData();
-        Object makeObj = cbMake.getSelectedItem();
-        Object modelObj = cbModel.getSelectedItem();
-        Object lensObj = cbLens.getSelectedItem();
-        data.make = makeObj != null ? makeObj.toString().trim() : "";
-        data.model = modelObj != null ? modelObj.toString().trim() : "";
-        data.lens = lensObj != null ? lensObj.toString().trim() : "";
+        data.make = getComboValue(cbMake);
+        data.model = getComboValue(cbModel);
+        data.lens = getComboValue(cbLens);
 
         if (data.make.isEmpty() || data.model.isEmpty()) {
             JOptionPane.showMessageDialog(this,
-                    "Hãng máy và Model máy đang để trống!\nHãy chọn từ danh sách, bấm 'Paste EXIF' hoặc 'Điền mẫu R5'.",
+                    "Hãng máy và Model máy đang để trống!\nHãy chọn từ danh sách, bấm 'Paste EXIF' hoặc 'Điền mẫu Ultra'.",
                     "Thiếu thông số", JOptionPane.WARNING_MESSAGE);
             return null;
         }
@@ -1062,8 +1077,9 @@ public class WriteExif extends JFrame {
         return data;
     }
 
+    // FIX LỖI 1: Cảnh báo nếu tên file mới trùng với một file khác đang tồn tại để chống mất ảnh
     private void saveCurrentImage() {
-        if (selectedIndex < 0 || selectedIndex >= imageFiles.size()) {
+        if (isBusy || selectedIndex < 0 || selectedIndex >= imageFiles.size()) {
             JOptionPane.showMessageDialog(this, "Vui lòng chọn ảnh trước!", "Lỗi", JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -1076,8 +1092,19 @@ public class WriteExif extends JFrame {
             newName += ".jpg";
         }
 
+        File currentFile = imageFiles.get(selectedIndex);
+        File targetFile = new File(currentFile.getParentFile(), newName);
+
+        if (!currentFile.equals(targetFile) && targetFile.exists()) {
+            int overwrite = JOptionPane.showConfirmDialog(this,
+                    "File '" + newName + "' đã tồn tại trong thư mục!\nBạn có chắc chắn muốn GHI ĐÈ lên file đó không?",
+                    "Cảnh báo trùng tên File", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (overwrite != JOptionPane.YES_OPTION) {
+                return;
+            }
+        }
+
         try {
-            File currentFile = imageFiles.get(selectedIndex);
             File updatedFile = applyExifAndRename(currentFile, newName, formData, 0);
 
             imageFiles.set(selectedIndex, updatedFile);
@@ -1108,7 +1135,7 @@ public class WriteExif extends JFrame {
     }
 
     private void stripExifCurrentImage() {
-        if (selectedIndex < 0 || selectedIndex >= imageFiles.size()) {
+        if (isBusy || selectedIndex < 0 || selectedIndex >= imageFiles.size()) {
             JOptionPane.showMessageDialog(this, "Vui lòng chọn ảnh trước!", "Lỗi", JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -1145,7 +1172,7 @@ public class WriteExif extends JFrame {
     }
 
     private void saveAllImagesInBackground() {
-        if (imageFiles.isEmpty()) {
+        if (isBusy || imageFiles.isEmpty()) {
             JOptionPane.showMessageDialog(this, "Chưa có ảnh nào trong danh sách!", "Lỗi", JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -1166,6 +1193,13 @@ public class WriteExif extends JFrame {
                 for (int i = 0; i < total; i++) {
                     File f = imageFiles.get(i);
                     String targetName = f.getName().startsWith("EXIF_") ? f.getName() : "EXIF_" + f.getName();
+                    File targetFile = new File(f.getParentFile(), targetName);
+
+                    // Tránh ghi đè nhầm nếu file đích đã tồn tại mà không phải chính nó
+                    if (!f.equals(targetFile) && targetFile.exists()) {
+                        targetName = "EXIF_" + System.currentTimeMillis() + "_" + f.getName();
+                    }
+
                     try {
                         File updated = applyExifAndRename(f, targetName, formData, i * stepSeconds);
                         imageFiles.set(i, updated);
@@ -1237,6 +1271,7 @@ public class WriteExif extends JFrame {
         }
     }
 
+    // FIX LỖI 4 & LỖI 5: Chuẩn hóa số thập phân RationalNumber gọn gàng và cho phép xóa thẻ Lens khi để trống
     private File applyExifAndRename(File sourceFile, String newFileName, ExifFormData data, int offsetSeconds) throws Exception {
         if (!isRealJpeg(sourceFile)) {
             throw new IllegalArgumentException("File '" + sourceFile.getName()
@@ -1269,7 +1304,7 @@ public class WriteExif extends JFrame {
 
         var exif = outputSet.getOrCreateExifDirectory();
         exif.removeField(ExifTagConstants.EXIF_TAG_FNUMBER);
-        exif.add(ExifTagConstants.EXIF_TAG_FNUMBER, RationalNumber.valueOf(data.fNumber));
+        exif.add(ExifTagConstants.EXIF_TAG_FNUMBER, toCleanRational(data.fNumber));
 
         exif.removeField(ExifTagConstants.EXIF_TAG_ISO);
         exif.add(ExifTagConstants.EXIF_TAG_ISO, (short) data.iso);
@@ -1278,13 +1313,14 @@ public class WriteExif extends JFrame {
         exif.add(ExifTagConstants.EXIF_TAG_EXPOSURE_TIME, new RationalNumber(data.shutterNum, data.shutterDen));
 
         exif.removeField(ExifTagConstants.EXIF_TAG_FOCAL_LENGTH);
-        exif.add(ExifTagConstants.EXIF_TAG_FOCAL_LENGTH, RationalNumber.valueOf(data.focal));
+        exif.add(ExifTagConstants.EXIF_TAG_FOCAL_LENGTH, toCleanRational(data.focal));
 
         exif.removeField(ExifTagConstants.EXIF_TAG_FOCAL_LENGTH_IN_35MM_FORMAT);
         exif.add(ExifTagConstants.EXIF_TAG_FOCAL_LENGTH_IN_35MM_FORMAT, (short) Math.round(data.focal));
 
+        // Luôn xóa thẻ Lens cũ trước, chỉ thêm mới nếu người dùng không để trống
+        exif.removeField(ExifTagConstants.EXIF_TAG_LENS_MODEL);
         if (!data.lens.isEmpty()) {
-            exif.removeField(ExifTagConstants.EXIF_TAG_LENS_MODEL);
             exif.add(ExifTagConstants.EXIF_TAG_LENS_MODEL, data.lens);
         }
 
@@ -1315,6 +1351,18 @@ public class WriteExif extends JFrame {
         return targetFile;
     }
 
+    // Chuyển số thực (VD: 1.8 hoặc 8.67) thành phân số tối giản chính xác (18/10 -> 9/5 hoặc 867/100)
+    private static RationalNumber toCleanRational(double value) {
+        long num = Math.round(value * 100.0);
+        long den = 100L;
+        long g = gcd(Math.abs(num), den);
+        return new RationalNumber((int) (num / g), (int) (den / g));
+    }
+
+    private static double roundTwoDecimals(double val) {
+        return BigDecimal.valueOf(val).setScale(2, RoundingMode.HALF_UP).doubleValue();
+    }
+
     private void moveWithRetry(File src, File dst) throws Exception {
         int attempts = 0;
         while (true) {
@@ -1341,6 +1389,11 @@ public class WriteExif extends JFrame {
     }
 
     private void setControlsEnabled(boolean enabled) {
+        isBusy = !enabled;
+        btnBrowse.setEnabled(enabled);
+        btnAddMore.setEnabled(enabled);
+        btnRemoveSelected.setEnabled(enabled);
+        btnClearAll.setEnabled(enabled);
         btnSaveSingle.setEnabled(enabled);
         btnSaveAll.setEnabled(enabled);
         btnStripExif.setEnabled(enabled);
@@ -1352,7 +1405,7 @@ public class WriteExif extends JFrame {
             b = a % b;
             a = t;
         }
-        return a;
+        return a == 0 ? 1 : a;
     }
 
     private static String trimTrailingZero(double val) {
@@ -1369,6 +1422,7 @@ public class WriteExif extends JFrame {
         return String.format("%.2f MB", kb / 1024.0);
     }
 
+    // FIX LỖI 8: Zoom giữ tâm khung nhìn và giới hạn biên kéo ảnh (Clamping) không cho ảnh văng khỏi màn hình
     private class ZoomableImagePanel extends JPanel {
         private BufferedImage image;
         private double zoomFactor = 1.0;
@@ -1407,6 +1461,7 @@ public class WriteExif extends JFrame {
                     Point cur = e.getPoint();
                     offsetX += (cur.x - dragStart.x);
                     offsetY += (cur.y - dragStart.y);
+                    clampOffsets();
                     dragStart = cur;
                     repaint();
                 }
@@ -1425,9 +1480,33 @@ public class WriteExif extends JFrame {
 
         public void zoomBy(double factor) {
             if (image == null) return;
+            double oldZoom = zoomFactor;
             zoomFactor = Math.max(0.2, Math.min(zoomFactor * factor, 10.0));
+            double actualRatio = zoomFactor / oldZoom;
+
+            // Giữ đúng tâm vùng đang xem khi phóng to / thu nhỏ
+            offsetX *= actualRatio;
+            offsetY *= actualRatio;
+            clampOffsets();
+
             lblZoomPercent.setText(Math.round(zoomFactor * 100) + "%");
             repaint();
+        }
+
+        private void clampOffsets() {
+            if (image == null || getWidth() <= 0 || getHeight() <= 0) return;
+            double baseScale = Math.min(
+                    (double) (getWidth() - 20) / image.getWidth(),
+                    (double) (getHeight() - 20) / image.getHeight()
+            );
+            double drawW = image.getWidth() * baseScale * zoomFactor;
+            double drawH = image.getHeight() * baseScale * zoomFactor;
+
+            double maxOffsetX = Math.max(100, (drawW + getWidth()) / 2.0 - 60);
+            double maxOffsetY = Math.max(100, (drawH + getHeight()) / 2.0 - 60);
+
+            offsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, offsetX));
+            offsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, offsetY));
         }
 
         public void resetZoom() {
