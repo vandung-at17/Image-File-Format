@@ -1,14 +1,27 @@
-target
-.idea
-log
-logs
-HELP.md
+# Maven & Build outputs
 target/
-!.mvn/wrapper/maven-wrapper.jar
-!**/src/main/**/target/
-!**/src/test/**/target/
+out/
+build/
 
-### STS ###
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Logs & Temp files
+log/
+logs/
+*.log
+*.dumpstream
+HELP.md
+
+# Desktop Packaging (jpackage)
+EXIFEditorPro/
+*.exe
+*.msi
+
+# Eclipse / STS / NetBeans / VSCode
 .apt_generated
 .classpath
 .factorypath
@@ -16,29 +29,9 @@ target/
 .settings
 .springBeans
 .sts4-cache
-
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
-
-### NetBeans ###
 /nbproject/private/
 /nbbuild/
 /dist/
 /nbdist/
 /.nb-gradle/
-build/
-!**/src/main/**/build/
-!**/src/test/**/build/
-
-### VS Code ###
 .vscode/
-# Thư mục đóng gói ứng dụng Desktop (jpackage bundle / runtime)
-EXIFEditorPro/
-*.dumpstream
-
-# File cài đặt exe/msi/app sinh ra khi build Desktop
-*.exe
-*.msi
