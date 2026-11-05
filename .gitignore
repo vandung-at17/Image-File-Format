@@ -35,3 +35,10 @@ build/
 
 ### VS Code ###
 .vscode/
+# Thư mục đóng gói ứng dụng Desktop (jpackage bundle / runtime)
+EXIFEditorPro/
+*.dumpstream
+
+# File cài đặt exe/msi/app sinh ra khi build Desktop
+*.exe
+*.msi
